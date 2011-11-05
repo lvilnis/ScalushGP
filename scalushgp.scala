@@ -26,13 +26,9 @@ WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
 PARTICULAR PURPOSE. See the GNU General Public License (http://www.gnu.org/licenses/)
 for more details.
 
-MASSIVE CAVEAT: This is a work in progress, is missing many instructions necessary to
-actually evolve decent programs, and is generally unfit for anything other than reading
-through (and is not so easy on the eyes, either).
+HOW TO USE:
 
-HOW TO USE (NOT THAT YOU SHOULD):
-
-Look at the example1 function at the end of the source for a demonstration
+Look at the example1/2/3 functions at the end of the source for a demonstration
 of how to use this implementation of PushGP. To actually run the program, I recommend
 Intellij IDEA Community Edition and the Scala plugin, and change it so Ctrl+Y is "Redo" and
 not "Delete Line", because that will make you lose a bunch of work.
@@ -41,8 +37,9 @@ HISTORY:
 
 10/22/2011: Started work.
 11/1/2011: First version released - very very alpha, for feedback only.
+11/5/2011: First working version - completed instruction set, fixed a bunch of bugs, added 3 examples
  
- */
+**/
 
 package PushGp
 
@@ -87,6 +84,12 @@ object MainModule {
     def modifyStack(ps: ProgramState, newStack: Stack[Boolean]) = ps.copy(BOOLEAN = newStack)
   }
 
+  case object AUXILIARY extends PushType[Program] {
+    val name = 'AUXILIARY
+    def getStack(ps: ProgramState) = ps.AUXILIARY
+    def modifyStack(ps: ProgramState, newStack: Stack[Program]) = ps.copy(AUXILIARY = newStack)
+  }
+
   case class Instruction(name: Symbol) {
     implicit def convert(s: Symbol) = Instruction(s)
   }
@@ -100,7 +103,9 @@ object MainModule {
   case class LBool(value: Boolean) extends Literal
 
 
-  sealed abstract case class Program
+  sealed abstract case class Program {
+    override def toString = programToString(this)
+  }
 
   case class PInstruction(value: Instruction) extends Program
 
@@ -117,7 +122,8 @@ object MainModule {
     CODE: Stack[Program] = Nil,
     INTEGER: Stack[Int] = Nil,
     FLOAT: Stack[Float] = Nil,
-    BOOLEAN: Stack[Boolean] = Nil
+    BOOLEAN: Stack[Boolean] = Nil,
+    AUXILIARY: Stack[Program] = Nil
     ) {
 
     def ->[T](ty: PushType[T]): Stack[T] =
@@ -175,7 +181,6 @@ object MainModule {
 
     var instructionTable: Map[String, InstructionDefinition[_ <: PushType[_]]] = Map.empty
     var instructionDefs: List[InstructionDefinition[_ <: PushType[_]]] = List.empty
-
 
     def lookupInstruction(ins: Instruction): ProgramState => ProgramState = {
       instructionTable(ins.name.name.toLowerCase).definition
@@ -315,6 +320,16 @@ object MainModule {
     case ps => ps
   }
 
+  def predBinop[T](PUSHTYPE: PushType[T])(op: (T, T) => Boolean): ProgramState => ProgramState = {
+    case ps@PUSHTYPE(a::b::rest) => ps push (BOOLEAN, op(a, b)) set (PUSHTYPE, rest)
+    case ps => ps
+  }
+
+  def conversion[T, U](FROMTYPE: PushType[T])(TOTYPE: PushType[U])(converter: T => U): ProgramState => ProgramState = {
+    case ps@FROMTYPE(a::_) => ps pop FROMTYPE push (TOTYPE, converter(a))
+    case ps => ps
+  }
+
   (add instruction FLOAT)('ADD)(binop(FLOAT)(_ + _))
   (add instruction INTEGER)('ADD)(binop(INTEGER)(_ + _))
 
@@ -346,7 +361,28 @@ object MainModule {
   (add instruction FLOAT)('COS)(unop(FLOAT)(fl => cos(fl).asInstanceOf[Float]))
   (add instruction FLOAT)('TAN)(unop(FLOAT)(fl => tan(fl).asInstanceOf[Float]))
 
-  // Implicit conversions to Program ADT
+  (add instruction FLOAT)('>)(predBinop(FLOAT)(_ > _))
+  (add instruction INTEGER)('>)(predBinop(INTEGER)(_ > _))
+
+  (add instruction FLOAT)('<)(predBinop(FLOAT)(_ < _))
+  (add instruction INTEGER)('<)(predBinop(INTEGER)(_ < _))
+
+  (add instruction FLOAT)('FROMBOOLEAN)(conversion(BOOLEAN)(FLOAT)(a => if (a) 1f else 0f))
+  (add instruction INTEGER)('FROMBOOLEAN)(conversion(BOOLEAN)(INTEGER)(a => if (a) 1 else 0))
+
+  (add instruction FLOAT)('FROMINTEGER)(conversion(INTEGER)(FLOAT)(a => int2float(a)))
+  (add instruction INTEGER)('FROMFLOAT)(conversion(FLOAT)(INTEGER)(a => a.asInstanceOf[Int]))
+
+  // Boolean instructions
+
+  (add instruction BOOLEAN)('AND)(binop(BOOLEAN)(_ && _))
+  (add instruction BOOLEAN)('OR)(binop(BOOLEAN)(_ || _))
+  (add instruction BOOLEAN)('NOT)(unop(BOOLEAN)( !_ ))
+
+  (add instruction BOOLEAN)('FROMINTEGER)(conversion(INTEGER)(BOOLEAN)(_ == 0f))
+  (add instruction BOOLEAN)('FROMFLOAT)(conversion(FLOAT)(BOOLEAN)(_ == 0))
+
+  // Implicit conversions to Program ADT and helpers for writing Program literals
   
   implicit def convert(s: Symbol) = PInstruction(Instruction(s))
   implicit def convert(s: Int) = PLiteral(LInt(s))
@@ -354,6 +390,7 @@ object MainModule {
   implicit def convert(s: Boolean) = PLiteral(LBool(s))
   implicit def convert(s: List[Program]) = PList(s)
   implicit def convert(s: PList) = s.value
+  def p(plist: Program*) = PList(plist.toList)
 
   // Code and Exec specific instructions
 
@@ -370,7 +407,112 @@ object MainModule {
     case ps => ps
   }
 
-  def p(plist: Program*) = PList(plist.toList)
+  (add instruction CODE)('APPEND)(binop(CODE)(ensureList(_):::ensureList(_)))
+
+  //(add instruction CODE)('ATOM)(unop(CODE)({ case  }))
+
+  (add instruction CODE)('CAR) {
+    case ps@CODE(PList(hd::tl)::rest) => ps set (CODE, hd::rest)
+    case ps => ps
+  }
+
+  // FIXME: this isn't quite right, i think its supposed to cons on a nil for scalars (but why?)
+  (add instruction CODE)('CDR) {
+    case ps@CODE(PList(hd::tl)::rest) => ps set (CODE, PList(tl)::rest)
+    case ps => ps
+  }
+
+  (add instruction CODE)('CONS) {
+    case ps@CODE(a::b::rest) => ps set (CODE, p(a, b)::rest)
+    case ps => ps
+  }
+
+  (add instruction CODE)('DO) {
+    case ps@CODE(prog::_) => ps push (EXEC, PInstruction(Instruction('CODE_POP))) push (EXEC, prog)
+    case ps => ps
+  }
+
+  (add instruction CODE)('DOSTAR) {
+    case ps@CODE(prog::rest) => ps set (CODE, rest) push (EXEC, prog)
+    case ps => ps
+  }
+
+  (add instruction CODE)('DOSTARRANGE) { ps =>
+    (ps, ps) match {
+      case (CODE(toDo::codeRest), INTEGER(destIdx::curIdx::intRest)) =>
+        val incr = if (curIdx < destIdx) 1 else if (destIdx > curIdx) -1 else 0
+        val newState = ps pop INTEGER pop CODE
+        val newInstr = if (incr == 0) toDo else
+          p(curIdx+incr, destIdx, 'CODE_QUOTE, toDo, 'CODE_DOSTARRANGE)
+        newState push (EXEC, newInstr)
+      case _ => ps
+    }
+  }
+
+  (add instruction EXEC)('DOSTARRANGE) { ps =>
+    (ps, ps) match {
+      case (EXEC(toDo::codeRest), INTEGER(destIdx::curIdx::intRest)) =>
+        val incr = if (curIdx < destIdx) 1 else if (destIdx > curIdx) -1 else 0
+        val newState = ps pop INTEGER pop EXEC
+        val newInstr = if (incr == 0) toDo else
+          p(curIdx+incr, destIdx, 'EXEC_DOSTARRANGE, toDo)
+        newState push (EXEC, newInstr)
+      case _ => ps
+    }
+  }
+
+  (add instruction CODE)('FROMBOOLEAN)(conversion(BOOLEAN)(CODE)(t => t))
+  (add instruction CODE)('FROMINTEGER)(conversion(INTEGER)(CODE)(t => t))
+  (add instruction CODE)('FROMFLOAT)(conversion(FLOAT)(CODE)(t => t))
+
+  (add instruction CODE)('QUOTE) {
+    case ps@EXEC(prog::_) => ps push (CODE, prog) pop EXEC
+    case ps => ps
+  }
+
+  (add instruction CODE)('IF) { ps =>
+    (ps, ps) match {
+      case (CODE(a::b::codeRest), BOOLEAN(cond::boolRest)) =>
+        ps pop BOOLEAN pop CODE pop CODE push (EXEC, (if (cond) a else b))
+      case _ => ps
+    }
+  }
+
+  (add instruction EXEC)('IF) { ps =>
+    (ps, ps) match {
+      case (EXEC(a::b::execRest), BOOLEAN(cond::boolRest)) =>
+        ps pop BOOLEAN pop EXEC push (EXEC, (if (cond) a else b))
+      case _ => ps
+    }
+  }
+
+  (add instruction CODE)('LENGTH) {
+    case ps@CODE(prog::_) => ps push (INTEGER, ensureList(prog).length) pop CODE
+    case ps => ps
+  }
+
+  (add instruction CODE)('LIST) {
+    case ps@CODE(a::b::rest) => ps set (CODE, p(b, a)::rest)
+    case ps => ps
+  }
+
+  (add instruction CODE)('NOOP) { ps => ps }
+  (add instruction EXEC)('NOOP) { ps => ps }
+
+  (add instruction CODE)('MEMBER) {
+    case ps@CODE(a::b::rest) => ps set (CODE, rest) push (BOOLEAN, ensureList(a) contains b)
+    case ps => ps
+  }
+
+  (add instruction CODE)('NULL) {
+    case ps@CODE(prog::_) => ps push (BOOLEAN, prog == Nil) pop CODE
+    case ps => ps
+  }
+
+  (add instruction CODE)('SIZE) {
+    case ps@CODE(prog::_) => ps push (INTEGER, countPoints(prog)) pop CODE
+    case ps => ps
+  }
 
   // these consts are everywhere, round em up already...
   val MAX_GENERATIONS = 1000
@@ -406,7 +548,7 @@ object MainModule {
   // of the cleanest way though. The traversing and accumulating are quite tangled up...
   def insertCodeAtPoint(tree: Program, pointIdx: Int, newSubtree: Program) = {
     def loop(tree: Program, newSubtree: Program, pointIdx: Int, pointsSoFar: Int): Program = {
-      if (pointIdx == 0) tree
+      if (pointIdx == 0) newSubtree
       else tree match {
         case PList(Nil) => PList(Nil)
         case PList(firstSubtree::rest) =>
@@ -414,9 +556,12 @@ object MainModule {
           val newPointsSoFar = pointsSoFar + pointsInFirstSubtree
           if (pointIdx <= newPointsSoFar)
             PList(loop(firstSubtree, newSubtree, pointIdx - pointsSoFar - 1, 0)::rest)
-          else loop(rest, newSubtree, pointIdx, newPointsSoFar) match {
-            case PList(replacedRest) => PList(replacedRest)
-            case _ => PList(Nil)
+          else {
+            val newTail = loop(rest, newSubtree, pointIdx, newPointsSoFar) match {
+              case PList(replacedRest) => replacedRest
+              case _ => Nil
+            }
+            PList(firstSubtree :: newTail)
           }
         case _ => newSubtree
       }
@@ -557,9 +702,9 @@ object MainModule {
     println("\n;; -*- Report at generation %s" format (generation))
     val sorted = population sortBy (_.totalError getOrElse 10000f)
     val best::_ = sorted
-    println("Best program: %s" format (best))
+    println("Best program: %s" format (programToString(best.program)))
     println("Partial simplification (may beat best): %s" format
-            (autoSimplify(best.program, errorFunc, numSimplifications, true, 1000)))
+            (programToString(autoSimplify(best.program, errorFunc, numSimplifications, true, 1000).program)))
     println("Errors: %s" format (best.errors))
     println("Total: %s" format (best.totalError))
     println("Scaled: %s" format (best.scaledError))
@@ -567,7 +712,7 @@ object MainModule {
     println("Average total errors in population: %s" format
             ((population map (_.totalError getOrElse 10000f) sum) / population.length))
     println("Median total errors in population: %s" format
-            (sorted(sorted.length / 2)))
+            (sorted(sorted.length / 2).totalError))
     println("Average program size in population: %s" format
             ((population map (_.program) map countPoints sum) / population.length))
     best
@@ -611,8 +756,9 @@ object MainModule {
 
   def shuffle[A]: List[A] => List[A] = {
     case xs@(_::_) =>
-      val item = randomElement(xs)
-      item :: shuffle(xs filterNot (_ == item))
+      val randIndex = randInt(xs.length)
+      val item = xs(randIndex)
+      item :: shuffle((xs take randIndex) ::: (xs drop (randIndex + 1)))
     case _ => Nil
   }
 
@@ -632,7 +778,7 @@ object MainModule {
       }
     } else {
       val elementsThisLevel = shuffle(decompose(points - 1, points - 1))
-      elementsThisLevel map (randomCodeWithSize(_, atomGenerators))
+      PList(elementsThisLevel map ((in: Int) => randomCodeWithSize(in, atomGenerators)))
     }
   }
 
@@ -684,7 +830,6 @@ object MainModule {
     autoSimplify(prog, cfg.errorFunction, cfg.reproductionSimplifications, shouldPrint, progressInterval)
   def report(cfg: GpConfig)(population: List[Individual], generation: Int): Individual =
     report(population, generation, cfg.errorFunction, cfg.reportSimplifications)
-
 
   case class GpConfig(
     errorFunction: Program => List[Float] =
@@ -750,15 +895,17 @@ object MainModule {
           historicalTotalErrors ::: (List(best.totalError) flatMap (_ map (f => List(f)) getOrElse Nil))
         if (!best.totalError.isEmpty && best.totalError.get <= cfg.errorThreshold) {
           println("\n\nSUCCESS at generation %s\nSuccessful program: %s\nErrors: %s\nTotal error: %s\nSize: %s\n" format
-                  (generation, best.program, best.errors, best.totalError, countPoints(best.program)))
-          Some(autoSimplify(cfg)(best.program, false, 1000))
+                  (generation, programToString(best.program), best.errors, best.totalError, countPoints(best.program)))
+          val simplified = autoSimplify(cfg)(best.program, false, 1000);
+          println("Simplified successful program: %s" format (programToString(simplified.program)));
+          Some(simplified)
         } else {
           println("Producing offspring...")
           val newGeneration = createNewGeneration(cfg, populationWithErrors)
           mainLoop(1 + generation, newGeneration, newHistoricalErrors)
         }
       } else {
-        println("FAILURE")
+        println("FAILURE");
         None
       }
     }
@@ -791,9 +938,22 @@ object MainModule {
     }
   }
 
+  // evolve a program to model f(x) = x^2 using all instrs
+  def example1(): Option[Individual] =
+    pushgp(GpConfig(
+      errorFunction = { program =>
+        List.range(0, 10) map { input =>
+          val state = ProgramState() push (INTEGER, input)
+          runRush(program, state, false) match {
+            case INTEGER(topInt::intRest) => abs(topInt - (input * input)): Float
+            case _ => 1000f
+          }
+        }
+      }
+    ))
 
   // evolve a program to model f(x) = x^2 using only integer instrs
-  def example1(): Option[Individual] =
+  def example2(): Option[Individual] =
     pushgp(GpConfig(
       errorFunction = { program =>
         List.range(0, 10) map { input =>
@@ -810,6 +970,62 @@ object MainModule {
           Generator(() => randFloat(): Program)
         ): List[AtomGenerator])
     ))
+
+
+  val testatomgens = (add.registeredForType(INTEGER) map (pr => Atom(pr): AtomGenerator)):::(
+        List(
+          Generator(() => randInt(100): Program),
+          Generator(() => randFloat(): Program)
+        ): List[AtomGenerator])
+
+  
+  // evolve a program to model f(x) = f!
+  def example3(): Option[Individual] = {
+
+    (add instruction AUXILIARY)('IN) {
+      case ps@AUXILIARY(PLiteral(LInt(i))::_) => ps push (INTEGER, i)
+      case ps => ps
+    }
+
+    def factorial(n: Int): Int = {
+      if (n < 2) 1 else n * factorial(n - 1)
+    }
+
+    pushgp(GpConfig(
+      errorFunction = { program =>
+        List.range(1, 6) map { input =>
+          val state = ProgramState() push (INTEGER, input) push (AUXILIARY, PLiteral(LInt(input)))
+          runRush(program, state, false) match {
+            case INTEGER(topInt::intRest) => abs(topInt - factorial(input)): Float
+            case _ => 1000000000000f
+          }
+        }
+      },
+      atomGenerators = ((add.registeredForType(INTEGER):::
+        add.registeredForType(EXEC):::
+        add.registeredForType(BOOLEAN)) map (pr => Atom(pr): AtomGenerator)):::(
+        List(
+          Generator(() => randInt(100): Program),
+          Generator(() => randFloat(): Program),
+          Generator(() => 'AUXILIARY_IN: Program)
+        ): List[AtomGenerator]),
+      maxPoints = 100
+    ))
+  }
+
+  def programToString(prog: Program): String = {
+    prog match {
+      case PLiteral(lit) =>
+        lit match {
+          case LInt(i) => i.toString
+          case LFloat(f) => f.toString + "f"
+          case LBool(b) => b.toString
+        }
+      case PInstruction(Instruction(name)) => name.toString
+      case PList(ps@(_::_)) => "(" + (ps map programToString reduceLeft (_ + " " + _)) + ")"
+      case _ => "()"
+    }
+  }
 
   def main(args: Array[String]) {
     example1()
