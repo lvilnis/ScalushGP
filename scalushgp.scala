@@ -26,6 +26,10 @@ WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
 PARTICULAR PURPOSE. See the GNU General Public License (http://www.gnu.org/licenses/)
 for more details.
 
+CAVEAT:
+
+I still think there may be some bugs to shake out. I need a test suite like crazy.
+
 HOW TO USE:
 
 Look at the example1/2/3 functions at the end of the source for a demonstration
@@ -38,12 +42,14 @@ HISTORY:
 10/22/2011: Started work.
 11/1/2011: First version released - very very alpha, for feedback only.
 11/5/2011: First working version - completed instruction set, fixed a bunch of bugs, added 3 examples
- 
+11/12/2011: Got error scaling working, and changed to use parallel constructs where appropriate
+
 **/
 
 package PushGp
 
 import util.Random
+import annotation.tailrec
 
 object MainModule {
 
@@ -280,16 +286,16 @@ object MainModule {
   })
   (add instructions)('STACKDEPTH)(new PtypeInst {
     def as[A](PUSHTYPE: PushType[A]) = ps =>
-      ps push(INTEGER, (ps -> PUSHTYPE).length)
+      ps push(INTEGER, (ps->PUSHTYPE).length)
   })
   (add instructions)('YANK)(new PtypeInst {
-    def as[A](PUSHTYPE: PushType[A]): ProgramState => ProgramState = {
+    def as[A](PUSHTYPE: PushType[A]) = {
       case ps@INTEGER(rawYankIndex :: _) =>
         (ps pop INTEGER) match {
           case ps@PUSHTYPE(Nil) => ps
           case ps@PUSHTYPE(stk) =>
             val yankIndex = rawYankIndex min (stk.length - 1) max 0
-            val Some(item) = stk lift yankIndex
+            val item = stk(yankIndex)
             ps set (PUSHTYPE, item :: (stk take yankIndex) ::: (stk drop (yankIndex + 1)))
         }
       case ps => ps
@@ -443,7 +449,7 @@ object MainModule {
         val incr = if (curIdx < destIdx) 1 else if (destIdx > curIdx) -1 else 0
         val newState = ps pop INTEGER pop CODE
         val newInstr = if (incr == 0) toDo else
-          p(curIdx+incr, destIdx, 'CODE_QUOTE, toDo, 'CODE_DOSTARRANGE)
+          p(curIdx + incr, destIdx, 'CODE_QUOTE, toDo, 'CODE_DOSTARRANGE)
         newState push (EXEC, newInstr)
       case _ => ps
     }
@@ -455,7 +461,7 @@ object MainModule {
         val incr = if (curIdx < destIdx) 1 else if (destIdx > curIdx) -1 else 0
         val newState = ps pop INTEGER pop EXEC
         val newInstr = if (incr == 0) toDo else
-          p(curIdx+incr, destIdx, 'EXEC_DOSTARRANGE, toDo)
+          p(curIdx + incr, destIdx, 'EXEC_DOSTARRANGE, toDo)
         newState push (EXEC, newInstr)
       case _ => ps
     }
@@ -472,8 +478,8 @@ object MainModule {
 
   (add instruction CODE)('IF) { ps =>
     (ps, ps) match {
-      case (CODE(a::b::codeRest), BOOLEAN(cond::boolRest)) =>
-        ps pop BOOLEAN pop CODE pop CODE push (EXEC, (if (cond) a else b))
+      case (CODE(a::b::codeRest), BOOLEAN(cond::_)) =>
+        ps pop BOOLEAN set (CODE, codeRest) push (EXEC, if (cond) a else b)
       case _ => ps
     }
   }
@@ -481,7 +487,7 @@ object MainModule {
   (add instruction EXEC)('IF) { ps =>
     (ps, ps) match {
       case (EXEC(a::b::execRest), BOOLEAN(cond::boolRest)) =>
-        ps pop BOOLEAN pop EXEC push (EXEC, (if (cond) a else b))
+        ps pop BOOLEAN pop EXEC push (EXEC, if (cond) a else b)
       case _ => ps
     }
   }
@@ -521,6 +527,8 @@ object MainModule {
 
   // Should I try to implement some of these in terms of more general abstractions
   // like "foldprogram" or "filterprogram" ? Look into it...
+
+  def |>[A, B](a: A, f: A => B): B = f(a)
 
   def countPoints: Program => Int = {
     case PList(ps) => 1 + (ps map countPoints sum)
@@ -607,6 +615,7 @@ object MainModule {
   val TOP_LEVEL_PUSH_CODE = false
   val TOP_LEVEL_POP_CODE = false
 
+  @tailrec
   def execute(currentState: ProgramState, executionCount: Int, traces: List[Program], shouldPrint: Boolean): ProgramState = {
     currentState.EXEC match {
       case Nil => currentState
@@ -834,7 +843,7 @@ object MainModule {
   case class GpConfig(
     errorFunction: Program => List[Float] =
       (_ => error("Need to specify an error function!")),
-    errorThreshold: Int = 0,
+    errorThreshold: Float = 0,
     populationSize: Int = 1000,
     maxPoints: Int = 50,
     atomGenerators: List[AtomGenerator] =
@@ -878,14 +887,17 @@ object MainModule {
       println("Generation: %s" format (generation))
       if (generation <= MAX_GENERATIONS) {
         println("Computing errors...")
-        val populationWithErrors = population map { ind =>
+        val populationWithUnscaledErrors = population.par map { ind =>
           val errors = ind.errors match {
-            case _::_ => ind.errors
+            case _ :: _ => ind.errors
             case Nil => cfg.errorFunction(ind.program)
           }
           val totalError = ind.totalError getOrElse errors.sum
           Individual(ind.program, errors, Some(totalError), Some(totalError))
-        }
+        } toList
+        val populationWithErrors =
+          if (cfg.scaleErrors) getPopulationWithScaledErrors(cfg)(populationWithUnscaledErrors)
+          else populationWithUnscaledErrors
         val best = report(cfg)(populationWithErrors, generation)
         // this is odd, don't think totalerror should be empty, this is a funky way to only add to
         // list if its not an option... nullable members in the individual class is a bad idea, we can
@@ -896,8 +908,8 @@ object MainModule {
         if (!best.totalError.isEmpty && best.totalError.get <= cfg.errorThreshold) {
           println("\n\nSUCCESS at generation %s\nSuccessful program: %s\nErrors: %s\nTotal error: %s\nSize: %s\n" format
                   (generation, programToString(best.program), best.errors, best.totalError, countPoints(best.program)))
-          val simplified = autoSimplify(cfg)(best.program, false, 1000);
-          println("Simplified successful program: %s" format (programToString(simplified.program)));
+          val simplified = autoSimplify(cfg)(best.program, false, 1000)
+          println("Simplified successful program: %s" format (programToString(simplified.program)))
           Some(simplified)
         } else {
           println("Producing offspring...")
@@ -910,45 +922,61 @@ object MainModule {
       }
     }
 
-    val startPopulation = List.range(0, cfg.populationSize) map { _ =>
+    val startPopulation = 0 to cfg.populationSize map { _ =>
       Individual(randomCode(cfg.maxPoints, cfg.atomGenerators), Nil, None, None)
     }
 
-    mainLoop(0, startPopulation, Nil)
+    mainLoop(0, startPopulation.toList, Nil)
    }
 
+  def getPopulationWithScaledErrors(cfg: GpConfig)(basePop: List[Individual]): List[Individual] = {
+    println("Scaling errors...")
+    val numErrorsPerIndividual = basePop.head.errors.length - 1
+    val perCaseThreshold = numErrorsPerIndividual / cfg.errorThreshold
+    val totalSuccessesPerErrorCase = ((0 to numErrorsPerIndividual).par map { errorIndex =>
+      basePop filter (_.errors(errorIndex) <= perCaseThreshold) length
+    }).toList
+    basePop.par map { individual =>
+      val sumScaledErrors = (0 to numErrorsPerIndividual map { errorIndex =>
+        val error = individual.errors(errorIndex)
+        error / (1f + totalSuccessesPerErrorCase(errorIndex))
+      }).sum
+      individual.copy(scaledError = Some(sumScaledErrors))
+    } toList
+  }
 
   def createNewGeneration(cfg: GpConfig, population: List[Individual]): List[Individual] = {
     // get partial sums of probabilities to create partition of [0, 1] to choose which operator
     val probs = List(cfg.mutationProbability, cfg.crossoverProbability, cfg.simplificationProbability).scan(0.0f)((_ + _))
-    List.range(0, cfg.populationSize) map { individualIdx =>
-      val n = randFloat()
-      val newIndividual = select(cfg)(population, individualIdx)
-      if (n < probs(1))
-        mutate(cfg)(newIndividual)
-      else if (n < probs(2))
-        crossover(cfg)(
-          newIndividual,
-          if (cfg.compensatoryMateSelection) selectCompensatory(cfg)(population, individualIdx, newIndividual)
-          else select(cfg)(population, individualIdx))
-      else if (n < probs(3))
-        autoSimplify(cfg)(newIndividual.program, false, 1000)
-      else
-        newIndividual
-    }
+    (0 to cfg.populationSize).par map {
+      individualIdx =>
+        val n = randFloat()
+        val newIndividual = select(cfg)(population, individualIdx)
+        if (n < probs(1))
+          mutate(cfg)(newIndividual)
+        else if (n < probs(2))
+          crossover(cfg)(
+            newIndividual,
+            if (cfg.compensatoryMateSelection) selectCompensatory(cfg)(population, individualIdx, newIndividual)
+            else select(cfg)(population, individualIdx))
+        else if (n < probs(3))
+          autoSimplify(cfg)(newIndividual.program, false, 1000)
+        else
+          newIndividual
+    } toList
   }
 
   // evolve a program to model f(x) = x^2 using all instrs
   def example1(): Option[Individual] =
     pushgp(GpConfig(
       errorFunction = { program =>
-        List.range(0, 10) map { input =>
+        0 to 10 map { input =>
           val state = ProgramState() push (INTEGER, input)
           runRush(program, state, false) match {
             case INTEGER(topInt::intRest) => abs(topInt - (input * input)): Float
             case _ => 1000f
           }
-        }
+        } toList
       }
     ))
 
@@ -956,30 +984,29 @@ object MainModule {
   def example2(): Option[Individual] =
     pushgp(GpConfig(
       errorFunction = { program =>
-        List.range(0, 10) map { input =>
+        0 to 10 map { input =>
           val state = ProgramState() push (INTEGER, input)
           runRush(program, state, false) match {
             case INTEGER(topInt::intRest) => abs(topInt - (input * input)): Float
             case _ => 1000f
           }
-        }
+        } toList
       },
-      atomGenerators = (add.registeredForType(INTEGER) map (pr => Atom(pr): AtomGenerator)):::(
+      atomGenerators = (add registeredForType INTEGER map (pr => Atom(pr): AtomGenerator)):::(
         List(
           Generator(() => randInt(100): Program),
           Generator(() => randFloat(): Program)
         ): List[AtomGenerator])
     ))
 
-
-  val testatomgens = (add.registeredForType(INTEGER) map (pr => Atom(pr): AtomGenerator)):::(
+  val testatomgens = (add registeredForType INTEGER map (pr => Atom(pr): AtomGenerator)):::(
         List(
           Generator(() => randInt(100): Program),
           Generator(() => randFloat(): Program)
         ): List[AtomGenerator])
 
-  
   // evolve a program to model f(x) = f!
+  // using error scaling
   def example3(): Option[Individual] = {
 
     (add instruction AUXILIARY)('IN) {
@@ -993,13 +1020,13 @@ object MainModule {
 
     pushgp(GpConfig(
       errorFunction = { program =>
-        List.range(1, 6) map { input =>
+        1 to 6 map { input =>
           val state = ProgramState() push (INTEGER, input) push (AUXILIARY, PLiteral(LInt(input)))
           runRush(program, state, false) match {
             case INTEGER(topInt::intRest) => abs(topInt - factorial(input)): Float
             case _ => 1000000000000f
           }
-        }
+        } toList
       },
       atomGenerators = ((add.registeredForType(INTEGER):::
         add.registeredForType(EXEC):::
@@ -1009,7 +1036,8 @@ object MainModule {
           Generator(() => randFloat(): Program),
           Generator(() => 'AUXILIARY_IN: Program)
         ): List[AtomGenerator]),
-      maxPoints = 100
+      maxPoints = 100,
+      scaleErrors = true
     ))
   }
 
@@ -1028,6 +1056,6 @@ object MainModule {
   }
 
   def main(args: Array[String]) {
-    example1()
+    example3()
   }
 }
